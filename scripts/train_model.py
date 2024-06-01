@@ -1,106 +1,98 @@
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, TrainingArguments, Trainer, DataCollatorWithPadding
-from datasets import load_dataset
-import warnings
-
-warnings.filterwarnings("ignore")
-import sys
 import os
-project_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(project_dir)
-from utils.utils import compute_metrics, evaluate_model, generate_predictions
+from datasets import Dataset
+from transformers import LlamaForCausalLM, LlamaTokenizer, Trainer, TrainingArguments, DataCollatorForLanguageModeling
+from peft import PeftModel
 
 def train_model():
-    # Load dataset
-    dataset = load_dataset('csv', data_files='data/amharic_news.csv')['train']
+    # Load the tokenized dataset
+    dataset_path = 'data/tokenized_dataset'
+    if not os.path.exists(dataset_path):
+        raise FileNotFoundError(f"Dataset not found at {dataset_path}")
     
-    # Split dataset into train and test sets
-    train_test_split = dataset.train_test_split(test_size=0.2, seed=42)
-    train_dataset = train_test_split['train']
-    test_dataset = train_test_split['test']
+    dataset = Dataset.load_from_disk(dataset_path)
+    print('The dataset is:', dataset)
 
-    # Define category mappings
-    categories = ["Others", "Local News", "Sports", "Entertainment", "Business", "International News", "Politics"]
-    category_to_id = {cat: idx for idx, cat in enumerate(categories)}
-    id_to_category = {idx: cat for cat, idx in category_to_id.items()}
+    if len(dataset) == 0:
+        raise ValueError("The loaded dataset is empty.")
     
-    model_name = "rasyosef/bert-small-amharic"
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # Check and print dataset sample
+    try:
+        print('Sample data from dataset:', dataset[0])
+    except IndexError as e:
+        raise ValueError(f"Error accessing dataset sample: {e}")
     
-    # Data collator
-    data_collator = DataCollatorWithPadding(tokenizer=tokenizer, return_tensors='pt')
-    
-    # Set format for datasets
-    train_dataset.set_format("torch")
-    test_dataset.set_format("torch")
-    
-    # Load model
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name,
-        num_labels=len(categories),
-        id2label={i: lbl for i, lbl in enumerate(categories)},
-        label2id={lbl: i for i, lbl in enumerate(categories)},
-        device_map="cuda"
-    )
-    
-    # Print model information
-    embedding_layer = model.base_model.embeddings
-    print(f"Embedding layer: {embedding_layer}")
-    print(f"Embedding details: {embedding_layer.word_embeddings.weight.shape}")
-    print(f"Model configuration: {model.config}")
-    
-    # Evaluate model before fine-tuning
-    before_finetuning_predictions = generate_predictions(model, test_dataset, device="cuda", id_to_category=id_to_category, num_samples=5)
-    print(before_finetuning_predictions)
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    test_before_metrics = evaluate_model(model, test_dataset, data_collator, device, 'test')
-    print(test_before_metrics)
-    
-    train_before_metrics = evaluate_model(model, train_dataset, data_collator, device, "train")
-    print(train_before_metrics)
-    
-    # Training arguments
+    # Load the tokenizer and model
+    MAIN_PATH = '/home/abraham_teka/Llama-2-7b-hf'
+    peft_model_path = '/home/abraham_teka/llama-2-amharic-3784m/pretrained'
+    model_name = MAIN_PATH
+
+    model = load_model(model_name, True)
+    tokenizer = LlamaTokenizer.from_pretrained(model_name)
+    embedding_size = model.get_input_embeddings().weight.shape[0]
+
+    # Check tokenizer and embedding size
+    if len(tokenizer) != embedding_size:
+        print("Resizing the embedding size to match the tokenizer size")
+        model.resize_token_embeddings(len(tokenizer))
+
+    # Load the PEFT model if provided
+    if peft_model_path:
+        model = load_peft_model(model, peft_model_path, len(tokenizer))
+
+    # Define training arguments
     training_args = TrainingArguments(
-        output_dir=model_name + "-finetuned",
+        output_dir='./models/fine_tuned_model',
+        num_train_epochs=3,
+        per_device_train_batch_size=4,
+        save_steps=10_000,
+        save_total_limit=2,
+        logging_dir='./logs',
+        logging_steps=200,
+        evaluation_strategy="steps",
+        eval_steps=500,
         learning_rate=2e-5,
-        per_device_train_batch_size=64,
-        per_device_eval_batch_size=64,
-        num_train_epochs=5,
-        weight_decay=0.1,
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        logging_strategy="epoch",
+        weight_decay=0.01,
+        warmup_steps=500,
         load_best_model_at_end=True,
-        metric_for_best_model="f1",
-        fp16=True,
-        seed=42,
+        metric_for_best_model="loss",
     )
-    
-    # Trainer
+
+    # Define data collator for language modeling
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False
+    )
+
+    # Initialize the Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=test_dataset,
-        tokenizer=tokenizer,
+        train_dataset=dataset,
         data_collator=data_collator,
-        compute_metrics=compute_metrics,
     )
-    
+
     # Train the model
     trainer.train()
-    
-    # Evaluate model after fine-tuning
-    test_after_metrics = evaluate_model(model, test_dataset, data_collator, device, 'test')
-    print(test_after_metrics)
-    
-    train_after_metrics = evaluate_model(model, train_dataset, data_collator, device, "train")
-    print(train_after_metrics)
-    
-    # Save the fine-tuned model
+
+    # Save the trained model and tokenizer
     trainer.save_model('./models/fine_tuned_model')
     tokenizer.save_pretrained('./models/fine_tuned_model')
+
+def load_model(model_name, quantization):
+    model = LlamaForCausalLM.from_pretrained(
+        model_name,
+        return_dict=True,
+        load_in_8bit=quantization,
+        device_map="auto",
+        low_cpu_mem_usage=True,
+    )
+    return model
+
+def load_peft_model(model, peft_model_path, tokenizer_length):
+    # Adjust the PEFT model to match the tokenizer length
+    peft_model = PeftModel.from_pretrained(model, peft_model_path)
+    peft_model.resize_token_embeddings(tokenizer_length)
+    return peft_model
 
 if __name__ == "__main__":
     train_model()
