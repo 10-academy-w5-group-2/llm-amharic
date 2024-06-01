@@ -7,23 +7,25 @@ This repository contains scripts and instructions to fine-tune the LLaMA-2-7b-ch
 ## Project Structure
 ```
 llm-amharic/
-├── api/
-│ └──  app.py
+├── data/
+│ ├── tokenized_dataset/
+│ └── load_data_to_db.py
 ├── docker/
 │ ├── Dockerfile
 │ └── docker-compose.yml
 ├── scripts/
-│ └── inference_script.py
-├── scripts/
-│ ├── data_preprocessing.py
-│ ├── data_preprocessing.py
-│ ├── data_preprocessing.py
-│ ├── data_preprocessing.py
-│ └── finetuning.py
+│ ├── evaluate_modle.py
+│ ├── inference_script.py
+│ ├── tokenize_data.py
+│ ├── train_model.py
+│ └── train_tokenizer.py
 ├── utils/
 │ ├── data_preprocessing.py
 │ └── fetch_data_from_db.py
 ├── .gitignore
+├── amharic.model
+├── amharic.vocab
+├── README.md
 └── README.md
 ```
 
@@ -67,10 +69,6 @@ llm-amharic/
 5. **Evaluate the model**
     ```sh
     python scripts/evaluate_model.py
-    ```
-5. **Deploy the model**
-    ```sh
-    python scripts/deploy_model.py
     ```
 
 ## Database Setup
